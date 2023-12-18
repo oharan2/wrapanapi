@@ -1831,21 +1831,25 @@ class EC2System(System, VmMixin, TemplateMixin, StackMixin, NetworkMixin):
         Args:
             query: keywords and filters for resources; default is "" (all)
             view: arn of the view to use for the query; default is "" (default view)
-
+            time_ref: a relative time reference for indicating the filter value of a relative time, given in a {time_value}{time_unit} format; default is "" (no filtering)
         Return:
             a list of resources satisfying the query
 
         Examples:
             Use query "tag.key:kubernetes.io/cluster/*" to list OCP resources
+            Use the time_ref "1h" to collect resources that exist for more than an hour
         """
         args = {"QueryString": query}
         if view:
             args["ViewArn"] = view
-        if time_ref:
-            time_treshold = dateparser.parse(f"now-{time_ref}")
         list = []
         paginator = self.resource_explorer_connection.get_paginator("search")
         page_iterator = paginator.paginate(**args)
+
+        time_treshold = datetime.now()
+        if time_ref:
+            # TODO change tz according to resosurce
+            time_treshold = dateparser.parse(f"now-{time_ref}-UTC")
         for page in page_iterator:
             resources = page.get("Resources")
             for r in resources:
