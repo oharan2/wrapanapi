@@ -1,6 +1,8 @@
 import base64
 import os
 import re
+from datetime import datetime
+import dateparser
 
 import boto3
 from boto3 import client as boto3client
@@ -544,6 +546,21 @@ class ResourceExplorerResource:
         if not name:
             name = self.id
         return name
+
+    @property
+    def date_modified(self) -> datetime:
+        """
+        Returns the time reference of the "LastReportedAt" tag, by the latest value.
+        If the tag doesn't exists, returns the current time.
+        Used for filtering resources by the latest modified time recorded.
+
+        Example:
+            datetime.datetime(2019, 3, 13, 14, 45, 33, tzinfo=tzutc())
+        # TODO use the creation date?
+        """
+        if self.properties:
+            recent = max(self.properties, key=lambda x: x=='LastReportedAt').get('LastReportedAt')
+        return recent or datetime.now()
 
 
 class EC2System(System, VmMixin, TemplateMixin, StackMixin, NetworkMixin):
@@ -1807,7 +1824,7 @@ class EC2System(System, VmMixin, TemplateMixin, StackMixin, NetworkMixin):
         self.remove_all_unused_volumes()
         self.remove_all_unused_ips()
 
-    def list_resources(self, query="", view="") -> list[ResourceExplorerResource]:
+    def list_resources(self, query="", view="", time_ref="") -> list[ResourceExplorerResource]:
         """
         Lists resources using AWS Resource Explorer (resource-explorer-2).
 
@@ -1824,12 +1841,16 @@ class EC2System(System, VmMixin, TemplateMixin, StackMixin, NetworkMixin):
         args = {"QueryString": query}
         if view:
             args["ViewArn"] = view
+        if time_ref:
+            time_treshold = dateparser.parse(f"now-{time_ref}")
         list = []
         paginator = self.resource_explorer_connection.get_paginator("search")
         page_iterator = paginator.paginate(**args)
         for page in page_iterator:
             resources = page.get("Resources")
             for r in resources:
+                if time_ref and (r.get("LastReportedAt") > time_treshold):
+                    continue
                 resource = ResourceExplorerResource(
                     arn=r.get("Arn"),
                     region=r.get("Region"),
@@ -1839,3 +1860,20 @@ class EC2System(System, VmMixin, TemplateMixin, StackMixin, NetworkMixin):
                 )
                 list.append(resource)
         return list
+
+
+    def filter_resources_by_time(self, time_ref:str) -> list[ResourceExplorerResource]:
+        """
+        Filters a given list of resources using AWS Resource Explorer (resource-explorer-2).
+
+        Args:
+            time_ref: keywords and filters for resources; default is "" (all)
+
+        Return:
+            a list of resources satisfying the query
+
+        Examples:
+            Use query "tag.key:kubernetes.io/cluster/*" to list OCP resources
+        """
+        time_tres = dateparser.parse(f"now-{time_ref}")
+        return 1
