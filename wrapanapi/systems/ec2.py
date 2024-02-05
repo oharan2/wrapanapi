@@ -1,4 +1,5 @@
 import base64
+import logging
 import os
 import re
 from datetime import datetime
@@ -85,154 +86,6 @@ class _TagMixin:
         self.system.ec2_connection.delete_tags(
             Resources=[self.uuid], Tags=[{"Key": key, "Value": value}]
         )
-
-
-class EC2Instance(_TagMixin, _SharedMethodsMixin, Instance):
-    state_map = {
-        "pending": VmState.STARTING,
-        "stopping": VmState.STOPPING,
-        "shutting-down": VmState.STOPPING,
-        "running": VmState.RUNNING,
-        "stopped": VmState.STOPPED,
-        "terminated": VmState.DELETED,
-    }
-
-    def __init__(self, system, raw=None, **kwargs):
-        """
-        Constructor for an EC2Instance tied to a specific system.
-
-        Args:
-            system: an EC2System object
-            raw: the boto.ec2.instance.Instance object if already obtained, or None
-            uuid: unique ID of instance
-        """
-
-        self._uuid = raw.id if raw else kwargs.get("uuid")
-        if not self._uuid:
-            raise ValueError("missing required kwarg: 'uuid'")
-
-        super().__init__(system, raw, **kwargs)
-
-        self._api = self.system.ec2_connection
-
-    @property
-    def name(self):
-        tag_value = self.get_tag_value("Name")
-        return getattr(self.raw, "name", None) or tag_value if tag_value else self.raw.id
-
-    def _get_state(self):
-        self.refresh()
-        return self._api_state_to_vmstate(self.raw.state.get("Name"))
-
-    @property
-    def ip(self):
-        self.refresh()
-        return self.raw.public_ip_address
-
-    @property
-    def all_ips(self):
-        """Wrapping self.ip to meet abstractproperty requirement
-
-        Returns: (list) the addresses assigned to the machine
-        """
-        return [self.ip]
-
-    @property
-    def type(self):
-        return self.raw.instance_type
-
-    @property
-    def creation_time(self):
-        self.refresh()
-        # Example instance.launch_time: datetime.datetime(2019, 3, 13, 14, 45, 33, tzinfo=tzutc())
-        return self.raw.launch_time
-
-    @property
-    def az(self):
-        return self.raw.placement["AvailabilityZone"]
-
-    def delete(self, timeout=240):
-        """
-        Delete instance. Wait for it to move to 'deleted' state
-
-        Returns:
-            True if successful
-            False if otherwise, or action timed out
-        """
-        self.logger.info("terminating EC2 instance '%s'", self.uuid)
-        try:
-            self.raw.terminate()
-            self.wait_for_state(VmState.DELETED, timeout=timeout)
-            return True
-        except ActionTimedOutError:
-            return False
-
-    def cleanup(self):
-        return self.delete()
-
-    def start(self, timeout=240):
-        """
-        Start instance. Wait for it to move to 'running' state
-
-        Returns:
-            True if successful
-            False if otherwise, or action timed out
-        """
-        self.logger.info("starting EC2 instance '%s'", self.uuid)
-        try:
-            self.raw.start()
-            self.wait_for_state(VmState.RUNNING, timeout=timeout)
-            return True
-        except ActionTimedOutError:
-            return False
-
-    def stop(self, timeout=360):
-        """
-        Stop instance. Wait for it to move to 'stopped' state
-
-        Returns:
-            True if successful
-            False if otherwise, or action timed out
-        """
-        self.logger.info("stopping EC2 instance '%s'", self.uuid)
-        try:
-            self.raw.stop()
-            self.wait_for_state(VmState.STOPPED, timeout=timeout)
-            return True
-        except ActionTimedOutError:
-            return False
-
-    def restart(self):
-        """
-        Restart instance
-
-        The action is taken in two separate calls to EC2. A 'False' return can
-        indicate a failure of either the stop action or the start action.
-
-        Note: There is a reboot_instances call available on the API, but it provides
-            less insight than blocking on stop_vm and start_vm. Furthermore,
-            there is no "rebooting" state, so there are potential monitoring
-            issues that are avoided by completing these steps atomically
-
-        Returns:
-            True if stop and start succeeded
-            False if otherwise, or action timed out
-        """
-        self.logger.info("restarting EC2 instance '%s'", self.uuid)
-        stopped = self.stop()
-        if not stopped:
-            self.logger.error("Stopping instance '%s' failed or timed out", self.uuid)
-        started = self.start()
-        if not started:
-            self.logger.error("Starting instance '%s' failed or timed out", self.uuid)
-        return stopped and started
-
-    def change_type(self, instance_type):
-        try:
-            self.raw.modify_attribute(InstanceType={"Value": instance_type})
-            return True
-        except Exception:
-            return False
 
 
 class StackStates:
@@ -484,17 +337,170 @@ class EBSVolume(_TagMixin, _SharedMethodsMixin, Volume):
         return self.delete()
 
 
-class ResourceExplorerResource:
+class EC2Instance(_TagMixin, _SharedMethodsMixin, Instance):
+    state_map = {
+        "pending": VmState.STARTING,
+        "stopping": VmState.STOPPING,
+        "shutting-down": VmState.STOPPING,
+        "running": VmState.RUNNING,
+        "stopped": VmState.STOPPED,
+        "terminated": VmState.DELETED,
+    }
+
+    def __init__(self, system, raw=None, **kwargs):
+        """
+        Constructor for an EC2Instance tied to a specific system.
+
+        Args:
+            system: an EC2System object
+            raw: the boto.ec2.instance.Instance object if already obtained, or None
+            uuid: unique ID of instance
+        """
+
+        self._uuid = raw.id if raw else kwargs.get("uuid")
+        if not self._uuid:
+            raise ValueError("missing required kwarg: 'uuid'")
+
+        super().__init__(system, raw, **kwargs)
+
+        self._api = self.system.ec2_connection
+
+    @property
+    def name(self):
+        tag_value = self.get_tag_value("Name")
+        return getattr(self.raw, "name", None) or tag_value if tag_value else self.raw.id
+
+    def _get_state(self):
+        self.refresh()
+        return self._api_state_to_vmstate(self.raw.state.get("Name"))
+
+    @property
+    def ip(self):
+        self.refresh()
+        return self.raw.public_ip_address
+
+    @property
+    def all_ips(self):
+        """Wrapping self.ip to meet abstractproperty requirement
+
+        Returns: (list) the addresses assigned to the machine
+        """
+        return [self.ip]
+
+    @property
+    def type(self):
+        return self.raw.instance_type
+
+    @property
+    def creation_time(self):
+        self.refresh()
+        # Example instance.launch_time: datetime.datetime(2019, 3, 13, 14, 45, 33, tzinfo=tzutc())
+        return self.raw.launch_time
+
+    @property
+    def az(self):
+        return self.raw.placement["AvailabilityZone"]
+
+    def delete(self, timeout=240):
+        """
+        Delete instance. Wait for it to move to 'deleted' state
+
+        Returns:
+            True if successful
+            False if otherwise, or action timed out
+        """
+        self.logger.info("terminating EC2 instance '%s'", self.uuid)
+        try:
+            self.raw.terminate()
+            self.wait_for_state(VmState.DELETED, timeout=timeout)
+            return True
+        except ActionTimedOutError:
+            return False
+
+    def cleanup(self):
+        return self.delete()
+
+    def start(self, timeout=240):
+        """
+        Start instance. Wait for it to move to 'running' state
+
+        Returns:
+            True if successful
+            False if otherwise, or action timed out
+        """
+        self.logger.info("starting EC2 instance '%s'", self.uuid)
+        try:
+            self.raw.start()
+            self.wait_for_state(VmState.RUNNING, timeout=timeout)
+            return True
+        except ActionTimedOutError:
+            return False
+
+    def stop(self, timeout=360):
+        """
+        Stop instance. Wait for it to move to 'stopped' state
+
+        Returns:
+            True if successful
+            False if otherwise, or action timed out
+        """
+        self.logger.info("stopping EC2 instance '%s'", self.uuid)
+        try:
+            self.raw.stop()
+            self.wait_for_state(VmState.STOPPED, timeout=timeout)
+            return True
+        except ActionTimedOutError:
+            return False
+
+    def restart(self):
+        """
+        Restart instance
+
+        The action is taken in two separate calls to EC2. A 'False' return can
+        indicate a failure of either the stop action or the start action.
+
+        Note: There is a reboot_instances call available on the API, but it provides
+            less insight than blocking on stop_vm and start_vm. Furthermore,
+            there is no "rebooting" state, so there are potential monitoring
+            issues that are avoided by completing these steps atomically
+
+        Returns:
+            True if stop and start succeeded
+            False if otherwise, or action timed out
+        """
+        self.logger.info("restarting EC2 instance '%s'", self.uuid)
+        stopped = self.stop()
+        if not stopped:
+            self.logger.error("Stopping instance '%s' failed or timed out", self.uuid)
+        started = self.start()
+        if not started:
+            self.logger.error("Starting instance '%s' failed or timed out", self.uuid)
+        return stopped and started
+
+    def change_type(self, instance_type):
+        try:
+            self.raw.modify_attribute(InstanceType={"Value": instance_type})
+            return True
+        except Exception:
+            return False
+
+
+class ResourceExplorerResource(EC2Instance):
     """
     This class represents a resource returned by Resource Explorer.
     """
 
-    def __init__(self, arn, region, resource_type, service, properties=[]):
+    def __init__(self, arn, region, resource_type, service, properties, **kwargs):
         self.arn = arn
         self.region = region
         self.resource_type = resource_type
         self.service = service
         self.properties = properties
+
+        if kwargs:
+            kwargs["uuid"] = self.id
+            kwargs["raw"] = kwargs["system"].ec2_resource.Instance(self.id)
+            super().__init__(**kwargs)
 
     def get_tag_value(self, key) -> str:
         """
@@ -533,7 +539,7 @@ class ResourceExplorerResource:
         This part is used as id in aws cli.
         """
         if self.arn:
-            return self.arn.split(":")[-1]
+            return self.arn.split(":")[-1].split("/")[-1]
         return None
 
     @property
@@ -556,11 +562,12 @@ class ResourceExplorerResource:
 
         Example:
             datetime.datetime(2019, 3, 13, 14, 45, 33, tzinfo=tzutc())
-        # TODO use the creation date?
+        # TODO use the creation date or modified date?
         """
+        modified_date = None
         if self.properties:
-            recent = max(self.properties, key=lambda x: x=='LastReportedAt').get('LastReportedAt')
-        return recent or datetime.now()
+            modified_date = max(self.properties, key=lambda x: x=='LastReportedAt').get('LastReportedAt')
+        return modified_date
 
 
 class EC2System(System, VmMixin, TemplateMixin, StackMixin, NetworkMixin):
@@ -1839,30 +1846,47 @@ class EC2System(System, VmMixin, TemplateMixin, StackMixin, NetworkMixin):
             Use query "tag.key:kubernetes.io/cluster/*" to list OCP resources
             Use the time_ref "1h" to collect resources that exist for more than an hour
         """
+        kwargs = {}
         args = {"QueryString": query}
         if view:
             args["ViewArn"] = view
         list = []
         paginator = self.resource_explorer_connection.get_paginator("search")
         page_iterator = paginator.paginate(**args)
+        time_threshold = dateparser.parse(f"now-{time_ref}-UTC")
 
-        time_treshold = datetime.now()
-        if time_ref:
-            # TODO change tz according to resosurce
-            time_treshold = dateparser.parse(f"now-{time_ref}-UTC")
-        for page in page_iterator:
-            resources = page.get("Resources")
-            for r in resources:
-                if time_ref and (r.get("LastReportedAt") > time_treshold):
-                    continue
-                resource = ResourceExplorerResource(
-                    arn=r.get("Arn"),
-                    region=r.get("Region"),
-                    service=r.get("Service"),
-                    properties=r.get("Properties"),
-                    resource_type=r.get("ResourceType"),
-                )
-                list.append(resource)
+        try:
+            for page in page_iterator:
+                resources = page.get("Resources")
+                for raw in resources:
+                    # Will not collect resources recorded during the SLA time
+                    if time_ref and (raw.get("LastReportedAt") > time_threshold):
+                        continue
+                    if raw.get("ResourceType") == "ec2:instance":
+                        kwargs = {"system": self}
+
+                    resource = ResourceExplorerResource(
+                    arn=raw.get("Arn"),
+                    region=raw.get("Region"),
+                    service=raw.get("Service"),
+                    properties=raw.get("Properties"),
+                    resource_type=raw.get("ResourceType"),
+                    **kwargs,
+                    )
+
+                    resource.launch_time <<<
+
+                    # TODO
+                    ec2 = self.ec2_resource.Instance(resource.id)
+                    ec2 = self.ec2_connection.describe_instances
+                    >>>
+                    EC2Instance(
+                        system=self, raw=self.ec2_resource.Instance(resource.id)
+                    )
+                    instances = self._get_instances()
+                    list.append(resource)
+        except Exception as error:
+            return error
         return list
 
 
