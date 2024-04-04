@@ -1,5 +1,3 @@
-from botocore.errorfactory import UnauthorizedException
-
 class ActionNotSupported(Exception):
     """Raised when an action is not supported."""
 
@@ -199,12 +197,3 @@ class VMInstanceNotStopped(Exception):
         return "Could not perform '{a}' on '{vm}' because it's not stopped.".format(
             a=self.action, vm=self.vm_name
         )
-
-
-class UnauthorizedRegion(UnauthorizedException):
-    """
-    Raised when the client uses a region that is not defined as an Index Aggregator in the Resource Explorer.
-    Official docs: https://docs.aws.amazon.com/resource-explorer/latest/userguide/manage-aggregator-region.html
-    """
-
-    pass
