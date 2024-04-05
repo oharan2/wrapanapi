@@ -25,6 +25,7 @@ from wrapanapi.exceptions import ActionTimedOutError
 from wrapanapi.exceptions import MultipleItemsError
 from wrapanapi.exceptions import NotFoundError
 from wrapanapi.systems.base import System
+from wrapanapi.const import *
 
 
 def _regions(regionmodule, regionname):
@@ -365,10 +366,17 @@ class EC2Instance(_TagMixin, _SharedMethodsMixin, Instance):
 
         self._api = self.system.ec2_connection
 
+    def __repr__(self):
+        return f'{type(self)} Id: {self.id}, Name: {self.name}'
+
+    @property
+    def id(self):
+        return self.raw.id
+
     @property
     def name(self):
         tag_value = self.get_tag_value("Name")
-        return getattr(self.raw, "name", None) or tag_value if tag_value else self.raw.id
+        return getattr(self.raw, "name", None) or tag_value
 
     def _get_state(self):
         self.refresh()
@@ -485,7 +493,7 @@ class EC2Instance(_TagMixin, _SharedMethodsMixin, Instance):
             return False
 
 
-class ResourceExplorerResource(EC2Instance):
+class ResourceExplorerResource():
     """
     This class represents a resource returned by Resource Explorer.
     """
@@ -497,10 +505,17 @@ class ResourceExplorerResource(EC2Instance):
         self.service = service
         self.properties = properties
 
-        if kwargs:
-            kwargs["uuid"] = self.id
-            kwargs["raw"] = kwargs["system"].ec2_resource.Instance(self.id)
-            super().__init__(**kwargs)
+        if self.resource_type == EC2_INSTANCE:
+            if kwargs:
+                kwargs["uuid"] = self.id
+                kwargs["raw"] = kwargs["system"].ec2_resource.Instance(self.id)
+                self.ec2_instance=EC2Instance(**kwargs)
+        if self.resource_type == EC2_VOLUME:
+            if kwargs:
+                kwargs["uuid"] = self.id
+                kwargs["raw"] = kwargs["system"].ec2_resource.Volume(self.id)
+                self.ec2_volume=Volume(**kwargs)
+                self.attachments = [attc["InstanceId"] for attc in self.ec2_volume.raw.attachments]
 
     def get_tag_value(self, key) -> str:
         """
@@ -566,7 +581,7 @@ class ResourceExplorerResource(EC2Instance):
         """
         modified_date = None
         if self.properties:
-            modified_date = max(self.properties, key=lambda x: x=='LastReportedAt').get('LastReportedAt')
+            modified_date = max(self.properties, key=lambda x: x == 'LastReportedAt').get('LastReportedAt')
         return modified_date
 
 
@@ -691,11 +706,11 @@ class EC2System(System, VmMixin, TemplateMixin, StackMixin, NetworkMixin):
         instances = list()
         for reservation in reservations:
             for instance in reservation.get("Instances"):
+                instance_id = instance.get("InstanceId")
                 instances.append(
                     EC2Instance(
-                        system=self, raw=self.ec2_resource.Instance(instance.get("InstanceId"))
+                        system=self, raw=self.ec2_resource.Instance(instance_id),uuid=instance_id)
                     )
-                )
         return instances
 
     @staticmethod
@@ -790,7 +805,7 @@ class EC2System(System, VmMixin, TemplateMixin, StackMixin, NetworkMixin):
         return [inst for inst in self._get_instances(**kwargs)]
 
     def create_vm(
-        self, image_id, min_count=1, max_count=1, instance_type="t1.micro", vm_name="", **kwargs
+            self, image_id, min_count=1, max_count=1, instance_type="t1.micro", vm_name="", **kwargs
     ):
         """
         Creates aws instances.
@@ -1017,13 +1032,13 @@ class EC2System(System, VmMixin, TemplateMixin, StackMixin, NetworkMixin):
             EC2Image(system=self, raw=self.ec2_resource.Image(image)).delete()
 
     def find_templates(
-        self,
-        name=None,
-        id=None,
-        executable_by_me=True,
-        owned_by_me=True,
-        public=False,
-        filters=None,
+            self,
+            name=None,
+            id=None,
+            executable_by_me=True,
+            owned_by_me=True,
+            public=False,
+            filters=None,
     ):
         """
         Find image on ec2 system
@@ -1670,7 +1685,7 @@ class EC2System(System, VmMixin, TemplateMixin, StackMixin, NetworkMixin):
         return verbose_region_names
 
     def create_stack(
-        self, name, template_url=None, template_body=None, parameters=None, capabilities=None
+            self, name, template_url=None, template_body=None, parameters=None, capabilities=None
     ):
         if (not template_body and not template_url) or (template_body and template_url):
             raise ValueError("Either template_body or template_url must be set and not both!")
@@ -1749,13 +1764,13 @@ class EC2System(System, VmMixin, TemplateMixin, StackMixin, NetworkMixin):
             return False
 
     def create_image_from_snapshot(
-        self,
-        name,
-        snapshot_id,
-        architecture="x86_64",
-        ena_support=True,
-        virtualization_type="hvm",
-        device_name="/dev/sda1",
+            self,
+            name,
+            snapshot_id,
+            architecture="x86_64",
+            ena_support=True,
+            virtualization_type="hvm",
+            device_name="/dev/sda1",
     ):
         try:
             ami_id = self.ec2_connection.register_image(
@@ -1846,51 +1861,49 @@ class EC2System(System, VmMixin, TemplateMixin, StackMixin, NetworkMixin):
             Use query "tag.key:kubernetes.io/cluster/*" to list OCP resources
             Use the time_ref "1h" to collect resources that exist for more than an hour
         """
-        kwargs = {}
+        kwargs = {"system": self}
         args = {"QueryString": query}
         if view:
             args["ViewArn"] = view
+
         list = []
         paginator = self.resource_explorer_connection.get_paginator("search")
         page_iterator = paginator.paginate(**args)
         time_threshold = dateparser.parse(f"now-{time_ref}-UTC")
 
+        instances = self._get_instances()
         try:
             for page in page_iterator:
                 resources = page.get("Resources")
-                for raw in resources:
+                import ipdb
+                ipdb.set_trace()
+                for r in resources:
                     # Will not collect resources recorded during the SLA time
-                    if time_ref and (raw.get("LastReportedAt") > time_threshold):
+                    if time_ref and (r.get("LastReportedAt") > time_threshold):
                         continue
-                    if raw.get("ResourceType") == "ec2:instance":
-                        kwargs = {"system": self}
 
                     resource = ResourceExplorerResource(
-                    arn=raw.get("Arn"),
-                    region=raw.get("Region"),
-                    service=raw.get("Service"),
-                    properties=raw.get("Properties"),
-                    resource_type=raw.get("ResourceType"),
-                    **kwargs,
+                        arn=r.get("Arn"),
+                        region=r.get("Region"),
+                        service=r.get("Service"),
+                        properties=r.get("Properties"),
+                        resource_type=r.get("ResourceType"),
+                        **kwargs,
                     )
-
-                    resource.launch_time <<<
-
-                    # TODO
-                    ec2 = self.ec2_resource.Instance(resource.id)
-                    ec2 = self.ec2_connection.describe_instances
-                    >>>
-                    EC2Instance(
-                        system=self, raw=self.ec2_resource.Instance(resource.id)
-                    )
-                    instances = self._get_instances()
+                    # ec2 = self.ec2_resource.Instance(resource.id) Equivalent to resource.ec2_instance.
+                    # ec2 = self.ec2_connection.describe_instances() <= ec2["Reservations"][0]["Instances"]
                     list.append(resource)
-        except Exception as error:
-            return error
+        except ClientError as error:
+            if error.response["Error"]["Code"] == "UnauthorizedException":
+                # Raised when the client uses a region that is not defined as an Index Aggregator in the Resource
+                # Explorer. Official docs:
+                # https://docs.aws.amazon.com/resource-explorer/latest/userguide/manage-aggregator-region.html
+                logging.info(f"Region {self._region_name} is not an Index Aggregator.")
+            else:
+                raise error
         return list
 
-
-    def filter_resources_by_time(self, time_ref:str) -> list[ResourceExplorerResource]:
+    def filter_resources_by_time(self, time_ref: str) -> list[ResourceExplorerResource]:
         """
         Filters a given list of resources using AWS Resource Explorer (resource-explorer-2).
 
